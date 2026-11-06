@@ -14,6 +14,17 @@
 
 #import <Foundation/Foundation.h>
 #import <MobileVLCKit/MobileVLCKit.h>
+#include <mach/mach_time.h>
+
+static uint64_t start_time;
+
+/* milliseconds since launch, for the log */
+static double elapsed_ms(void)
+{
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    return (double)(mach_absolute_time() - start_time) * tb.numer / tb.denom / 1e6;
+}
 
 /* VLCConsoleLogger only logs in debug builds of VLCKit */
 @interface StderrLogger : NSObject <VLCLogging>
@@ -25,12 +36,13 @@
              logLevel:(VLCLogLevel)level
               context:(VLCLogContext *)context
 {
-    fprintf(stderr, "[%s] %s\n", context.module.UTF8String ?: "?", message.UTF8String);
+    fprintf(stderr, "%7.0f [%s] %s\n", elapsed_ms(), context.module.UTF8String ?: "?", message.UTF8String);
 }
 @end
 
 int main(int argc, char **argv)
 {
+    start_time = mach_absolute_time();
     @autoreleasepool {
         if (argc < 2) {
             fprintf(stderr, "usage: %s <file or URL> [seconds]\n", argv[0]);

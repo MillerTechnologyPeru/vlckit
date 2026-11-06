@@ -34,9 +34,8 @@ make run MEDIA=movie.mp4          # VLCPLAY_VERBOSE=1 for libvlc's log
 ```
 
 On an iPod touch 4 (iOS 6.1.6) MP3, H.264/AAC MP4 and VP8/Opus MKV files
-play to the end. The first video takes about 4 s to start while the
-freetype text renderer builds its font list through CoreText;
-`--text-renderer=none` avoids the wait.
+play to the end, and video starts about half a second after the audio.
+`VLCPLAY_VERBOSE=1` prints libvlc's log with milliseconds since launch.
 
 ## Why each step is there
 
@@ -78,6 +77,12 @@ freetype text renderer builds its font list through CoreText;
   use the Mach-O private prefix `L` instead. libvlc's Bonjour module looks up
   `NSNetService` at run time, as it moved from Foundation (iOS 6) to
   CFNetwork.
+- **Video output.** The iOS video output sets up its OpenGL ES surface on
+  its own thread, whose implicit Core Animation transaction iOS 6 never
+  commits: the layer never showed and each frame waited 1 s to present
+  (`0057`). And the subtitle renderer's CoreText family lookup matched on
+  display names too, which reads every font on the system: 2.5 s before
+  the first frame on an iPod (`0056`).
 - **No implicit autorelease pools.** iOS 6 threads have none, so the iOS
   audio output drains its AVAudioSession objects itself, and RemoteIO there
   has no channel layout property, which mono and stereo don't need.

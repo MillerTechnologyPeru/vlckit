@@ -1,0 +1,70 @@
+From 131b2465680466d5915507ef7fe0ce8df195268c Mon Sep 17 00:00:00 2001
+From: Alsey Coleman Miller <alseycmiller@gmail.com>
+Date: Thu, 5 Nov 2026 22:29:15 -0500
+Subject: [PATCH] freetype: darwin: look families up by family name first
+
+Matching a font collection on display and full names makes CoreText read
+every installed font: 2.5 s on an iPod touch 4 with iOS 6, spent while
+the video output starts, so the first seconds of video were dropped as
+late. Matching the family name alone takes about 50 ms there. Only search
+the other names when it finds nothing.
+---
+ modules/text_renderer/freetype/fonts/darwin.c | 33 +++++++++++++------
+ 1 file changed, 23 insertions(+), 10 deletions(-)
+
+diff --git a/modules/text_renderer/freetype/fonts/darwin.c b/modules/text_renderer/freetype/fonts/darwin.c
+index 7719a7f4c3..1b55770e1c 100644
+--- a/modules/text_renderer/freetype/fonts/darwin.c
++++ b/modules/text_renderer/freetype/fonts/darwin.c
+@@ -183,17 +183,31 @@ const vlc_family_t *CoreText_GetFamily(filter_t *p_filter, const char *psz_famil
+         coreTextFontDescriptors[x] = CTFontDescriptorCreateWithAttributes(coreTextAttributes[x]);
+     }
+ 
+-    CFArrayRef coreTextFontDescriptorsArray = CFArrayCreate(kCFAllocatorDefault,
+-                                                            (const void **)&coreTextFontDescriptors,
+-                                                            numberOfAttributes, NULL);
++    /* Matching the family name alone is quick, as CoreText looks families up.
++     * Display and full names make it read every installed font, which takes
++     * seconds on older devices (2.5 s on an iPod touch 4 with iOS 6, before
++     * the first video frame), so search them only if the family isn't found. */
++    for (size_t count = 1; count <= numberOfAttributes; count += numberOfAttributes - 1) {
++        CFArrayRef coreTextFontDescriptorsArray = CFArrayCreate(kCFAllocatorDefault,
++                                                                (const void **)&coreTextFontDescriptors,
++                                                                count, NULL);
++        coreTextFontCollection = CTFontCollectionCreateWithFontDescriptors(coreTextFontDescriptorsArray, 0);
++        CFRelease(coreTextFontDescriptorsArray);
++        if (coreTextFontCollection == NULL) {
++            msg_Warn(p_filter,"CTFontCollectionCreateWithFontDescriptors (1) failed!");
++            goto end;
++        }
+ 
+-    coreTextFontCollection = CTFontCollectionCreateWithFontDescriptors(coreTextFontDescriptorsArray, 0);
+-    if (coreTextFontCollection == NULL) {
+-        msg_Warn(p_filter,"CTFontCollectionCreateWithFontDescriptors (1) failed!");
+-        goto end;
++        matchedFontDescriptions = CTFontCollectionCreateMatchingFontDescriptors(coreTextFontCollection);
++        if (matchedFontDescriptions != NULL && CFArrayGetCount(matchedFontDescriptions) > 0)
++            break;
++        if (matchedFontDescriptions != NULL) {
++            CFRelease(matchedFontDescriptions);
++            matchedFontDescriptions = NULL;
++        }
++        CFRelease(coreTextFontCollection);
++        coreTextFontCollection = NULL;
+     }
+-
+-    matchedFontDescriptions = CTFontCollectionCreateMatchingFontDescriptors(coreTextFontCollection);
+     if (matchedFontDescriptions == NULL) {
+         msg_Warn(p_filter, "CTFontCollectionCreateMatchingFontDescriptors (2) failed!");
+         goto end;
+@@ -242,7 +256,6 @@ end:
+         CFRelease(coreTextFontDescriptors[x]);
+     }
+ 
+-    CFRelease(coreTextFontDescriptorsArray);
+     CFRelease(familyName);
+     free(psz_lc);
+ 
+-- 
+2.54.0 (Apple Git-157)
+

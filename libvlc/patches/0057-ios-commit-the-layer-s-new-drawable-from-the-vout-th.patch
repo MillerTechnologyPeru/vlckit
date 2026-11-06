@@ -1,0 +1,35 @@
+From b47e251476991d54484a10ec4d6a79a6d457b952 Mon Sep 17 00:00:00 2001
+From: Alsey Coleman Miller <alseycmiller@gmail.com>
+Date: Thu, 5 Nov 2026 22:59:12 -0500
+Subject: [PATCH] ios: commit the layer's new drawable from the vout thread
+
+The renderbuffer storage is set up on the vout thread, which has no run
+loop to commit the implicit Core Animation transaction that attaches the
+drawable to the layer. On iOS 6 it stays uncommitted: the render server
+never displays the layer, so each presentRenderbuffer waits for a free
+buffer until it times out after a second, the video stays black and
+almost every picture is dropped as late. Flush the transaction.
+---
+ modules/video_output/ios.m | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/modules/video_output/ios.m b/modules/video_output/ios.m
+index 957b312f45..2d6a04e8f7 100644
+--- a/modules/video_output/ios.m
++++ b/modules/video_output/ios.m
+@@ -585,6 +585,12 @@ - (BOOL)doResetBuffers:(vlc_gl_t *)gl
+     glBindRenderbuffer(GL_RENDERBUFFER, glsys->renderBuffer);
+ 
+     [_eaglContext renderbufferStorage:GL_RENDERBUFFER fromDrawable:_layer];
++    /* This runs on the vout thread, which has no run loop to commit the
++     * implicit Core Animation transaction attaching the new drawable to the
++     * layer. iOS 6 leaves it uncommitted: the render server never shows the
++     * layer, and every present waits for a free buffer until it times out
++     * (1 s), with nothing on screen. */
++    [CATransaction flush];
+ 
+     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, glsys->renderBuffer);
+     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+-- 
+2.54.0 (Apple Git-157)
+
