@@ -1,0 +1,163 @@
+From b40e92245142e753658811618b1326d58aa0ab21 Mon Sep 17 00:00:00 2001
+From: Alsey Coleman Miller <alseycmiller@gmail.com>
+Date: Thu, 5 Nov 2026 20:36:50 -0500
+Subject: [PATCH] core: avoid thread-local storage on armv7 iOS before 9.0
+
+Apple only supports thread-local storage on 32-bit iOS from iOS 9. When
+targeting older versions, keep the interrupt context in a pthread key and
+serialize the twalk() callers that pass state through a global.
+---
+ compat/tdestroy.c    | 13 +++++++++++++
+ include/vlc_fixups.h |  7 +++++++
+ src/misc/interrupt.c | 34 +++++++++++++++++++++++++++++++++-
+ src/misc/variables.c | 12 ++++++++++++
+ 4 files changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/compat/tdestroy.c b/compat/tdestroy.c
+index 6bb3480957..9f905bfa32 100644
+--- a/compat/tdestroy.c
++++ b/compat/tdestroy.c
+@@ -31,6 +31,13 @@
+ #endif
+ 
+ #ifdef HAVE_TFIND
++#ifdef VLC_NO_THREAD_LOCAL
++/* No thread-local storage: let one tdestroy() run at a time */
++# include <pthread.h>
++# define __thread
++static pthread_mutex_t tdestroy_lock = PTHREAD_MUTEX_INITIALIZER;
++#endif
++
+ static __thread struct
+ {
+     const void **tab;
+@@ -73,6 +80,9 @@ void tdestroy(void *root, void (*freenode)(void *))
+ 
+     assert(freenode != NULL);
+ 
++#ifdef VLC_NO_THREAD_LOCAL
++    pthread_mutex_lock(&tdestroy_lock);
++#endif
+     /* Enumerate nodes in order */
+     assert(list.count == 0);
+     twalk(root, list_nodes);
+@@ -91,6 +101,9 @@ void tdestroy(void *root, void (*freenode)(void *))
+          assert(node != NULL);
+     }
+     assert (root == NULL);
++#ifdef VLC_NO_THREAD_LOCAL
++    pthread_mutex_unlock(&tdestroy_lock);
++#endif
+ 
+     /* Destroy the nodes */
+     for (size_t i = 0; i < count; i++)
+diff --git a/include/vlc_fixups.h b/include/vlc_fixups.h
+index efcf4e81e0..4de33a9ace 100644
+--- a/include/vlc_fixups.h
++++ b/include/vlc_fixups.h
+@@ -45,6 +45,13 @@
+ # endif
+ #endif
+ 
++/* Apple's armv7 targets only have thread-local storage from iOS 9 */
++#if defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__) \
++    && __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__ < 90000 \
++    && !defined(__arm64__)
++# define VLC_NO_THREAD_LOCAL 1
++#endif
++
+ #ifndef __cplusplus
+ # ifdef HAVE_THREADS_H
+ #  include <threads.h>
+diff --git a/src/misc/interrupt.c b/src/misc/interrupt.c
+index c358f6ccd0..cdf9615f0a 100644
+--- a/src/misc/interrupt.c
++++ b/src/misc/interrupt.c
+@@ -43,8 +43,40 @@
+ #include "interrupt.h"
+ #include "libvlc.h"
+ 
++#ifdef VLC_NO_THREAD_LOCAL
++# include <pthread.h>
++
++static pthread_key_t vlc_interrupt_key;
++static pthread_once_t vlc_interrupt_once = PTHREAD_ONCE_INIT;
++
++static void vlc_interrupt_key_create(void)
++{
++    if (pthread_key_create(&vlc_interrupt_key, NULL))
++        abort();
++}
++
++static vlc_interrupt_t *vlc_interrupt_var_get(void)
++{
++    pthread_once(&vlc_interrupt_once, vlc_interrupt_key_create);
++    return pthread_getspecific(vlc_interrupt_key);
++}
++
++static void vlc_interrupt_var_set(vlc_interrupt_t *ctx)
++{
++    pthread_once(&vlc_interrupt_once, vlc_interrupt_key_create);
++    pthread_setspecific(vlc_interrupt_key, ctx);
++}
++
++# define vlc_interrupt_var (vlc_interrupt_var_get())
++#else
+ static thread_local vlc_interrupt_t *vlc_interrupt_var;
+ 
++static inline void vlc_interrupt_var_set(vlc_interrupt_t *ctx)
++{
++    vlc_interrupt_var = ctx;
++}
++#endif
++
+ /**
+  * Initializes an interruption context.
+  */
+@@ -100,7 +132,7 @@ vlc_interrupt_t *vlc_interrupt_set(vlc_interrupt_t *newctx)
+ {
+     vlc_interrupt_t *oldctx = vlc_interrupt_var;
+ 
+-    vlc_interrupt_var = newctx;
++    vlc_interrupt_var_set(newctx);
+     return oldctx;
+ }
+ 
+diff --git a/src/misc/variables.c b/src/misc/variables.c
+index 810c8ffc81..feb40ccf73 100644
+--- a/src/misc/variables.c
++++ b/src/misc/variables.c
+@@ -1378,7 +1378,13 @@ void DumpVariables(vlc_object_t *obj)
+     vlc_mutex_unlock(&vlc_internals(obj)->var_lock);
+ }
+ 
++#ifdef VLC_NO_THREAD_LOCAL
++/* No thread-local storage: let one var_GetAllNames() walk at a time */
++static vlc_mutex_t twalk_lock = VLC_STATIC_MUTEX;
++static void *twalk_ctx;
++#else
+ static thread_local void *twalk_ctx;
++#endif
+ 
+ static void TwalkGetNames(const void *data, const VISIT which, const int depth)
+ {
+@@ -1400,10 +1406,16 @@ char **var_GetAllNames(vlc_object_t *obj)
+     DECL_ARRAY(char *) names;
+     ARRAY_INIT(names);
+ 
++#ifdef VLC_NO_THREAD_LOCAL
++    vlc_mutex_lock(&twalk_lock);
++#endif
+     twalk_ctx = &names;
+     vlc_mutex_lock(&priv->var_lock);
+     twalk(priv->var_root, TwalkGetNames);
+     vlc_mutex_unlock(&priv->var_lock);
++#ifdef VLC_NO_THREAD_LOCAL
++    vlc_mutex_unlock(&twalk_lock);
++#endif
+ 
+     if (names.i_size == 0)
+         return NULL;
+-- 
+2.54.0 (Apple Git-157)
+
