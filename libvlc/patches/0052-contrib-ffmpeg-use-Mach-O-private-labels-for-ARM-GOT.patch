@@ -1,0 +1,54 @@
+From 17f55f7706bb30bb2d7e2a2a1dcfc76c56b0fcf9 Mon Sep 17 00:00:00 2001
+From: Alsey Coleman Miller <alseycmiller@gmail.com>
+Date: Thu, 5 Nov 2026 21:32:47 -0500
+Subject: [PATCH] contrib: ffmpeg: use Mach-O private labels for ARM GOT
+ pointers
+
+movrelx's Apple variant labels its non-lazy pointers .Lpic, which is a
+private prefix on ELF but an ordinary local symbol on Mach-O. ld from
+Xcode 27 then sees named atoms in the GOT section and asserts
+(setGotCoalescable) when linking libavcodec's armv6/NEON code. Use the
+Mach-O private prefix L instead.
+---
+ ...ch-O-private-label-for-movrelx-pointers.patch | 16 ++++++++++++++++
+ contrib/src/ffmpeg/rules.mak                     |  1 +
+ 2 files changed, 17 insertions(+)
+ create mode 100644 contrib/src/ffmpeg/0001-arm-use-a-Mach-O-private-label-for-movrelx-pointers.patch
+
+diff --git a/contrib/src/ffmpeg/0001-arm-use-a-Mach-O-private-label-for-movrelx-pointers.patch b/contrib/src/ffmpeg/0001-arm-use-a-Mach-O-private-label-for-movrelx-pointers.patch
+new file mode 100644
+index 0000000000..296ebb4139
+--- /dev/null
++++ b/contrib/src/ffmpeg/0001-arm-use-a-Mach-O-private-label-for-movrelx-pointers.patch
+@@ -0,0 +1,16 @@
++--- a/libavutil/arm/asm.S
+++++ b/libavutil/arm/asm.S
++@@ -227,9 +227,11 @@
++         ldr             \rd, [gp, \rd]
++         def_pic         \val(GOT), .Lpicoff\@
++ #elif CONFIG_PIC && defined(__APPLE__)
++-        ldpic           \rd, .Lpic\@, indir=1
+++        /* "L", not ".L", is Mach-O's private label prefix: the pointer
+++         * must be an anonymous atom for ld to coalesce it as a GOT entry */
+++        ldpic           \rd, Lpic\@, indir=1
++         .non_lazy_symbol_pointer
++-.Lpic\@:
+++Lpic\@:
++         .indirect_symbol \val
++         .word           0
++         .text
+diff --git a/contrib/src/ffmpeg/rules.mak b/contrib/src/ffmpeg/rules.mak
+index 81712d30f7..85a380d3d4 100644
+--- a/contrib/src/ffmpeg/rules.mak
++++ b/contrib/src/ffmpeg/rules.mak
+@@ -275,6 +275,7 @@ ifdef USE_LIBAV
+ 	$(APPLY) $(SRC)/ffmpeg/libav_gsm.patch
+ endif
+ 	$(APPLY) $(SRC)/ffmpeg/patch-as-patch-can.patch
++	$(APPLY) $(SRC)/ffmpeg/0001-arm-use-a-Mach-O-private-label-for-movrelx-pointers.patch
+ 	$(MOVE)
+ 
+ .ffmpeg: ffmpeg
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,235 @@
+From 1c1d1e13c2d0b2682cebd305488ee53952a106e4 Mon Sep 17 00:00:00 2001
+From: Alsey Coleman Miller <alseycmiller@gmail.com>
+Date: Thu, 5 Nov 2026 21:15:57 -0500
+Subject: [PATCH] build for iOS 6
+
+- fixups: Apple's SDKs declare ffsll() for iOS 7 and macOS 10.9 only, so
+  use the compat replacement under its own name before.
+- coreaudio: <os/lock.h> only exists in SDKs from iOS 10 and macOS 10.12,
+  use the mutex fallback when building with older ones.
+- audiounit_ios: declare the iOS 10 and 11 audio session types and
+  methods missing from older SDKs, and only change the number of output
+  channels from iOS 7.
+- freetype: CTFontManagerCreateFontDescriptorsFromURL is iOS 7+, use the
+  font file's first face before.
+---
+ include/vlc_fixups.h                          |  6 ++
+ modules/audio_output/audiounit_ios.m          | 58 ++++++++++++++-----
+ modules/audio_output/coreaudio_common.c       | 21 +++++--
+ modules/audio_output/coreaudio_common.h       |  7 ++-
+ modules/text_renderer/freetype/fonts/darwin.c |  8 +++
+ 5 files changed, 81 insertions(+), 19 deletions(-)
+
+diff --git a/include/vlc_fixups.h b/include/vlc_fixups.h
+index 4de33a9ace..51ae9a9c67 100644
+--- a/include/vlc_fixups.h
++++ b/include/vlc_fixups.h
+@@ -172,6 +172,12 @@ int vasprintf (char **, const char *, va_list);
+ 
+ /* string.h */
+ #ifndef HAVE_FFSLL
++# ifdef __APPLE__
++/* Apple's <strings.h> declares ffsll() as available from iOS 7 and
++ * macOS 10.9 only: declare it now and use our own under another name. */
++#  include <strings.h>
++#  define ffsll vlc_ffsll
++# endif
+ int ffsll(long long);
+ #endif
+ 
+diff --git a/modules/audio_output/audiounit_ios.m b/modules/audio_output/audiounit_ios.m
+index 535a7dc139..d710e5e823 100644
+--- a/modules/audio_output/audiounit_ios.m
++++ b/modules/audio_output/audiounit_ios.m
+@@ -87,6 +87,31 @@ @interface AVAudioSessionPortDescription (iOS15RoutingConfiguration)
+ 
+ #endif
+ 
++#if __IPHONE_OS_VERSION_MAX_ALLOWED && __IPHONE_OS_VERSION_MAX_ALLOWED < 110000
++
++/* SDKs older than iOS 11, used to target iOS 6 */
++#if __IPHONE_OS_VERSION_MAX_ALLOWED < 100000
++typedef NSString *AVAudioSessionCategory;
++typedef NSString *AVAudioSessionMode;
++#endif
++
++typedef NS_ENUM(NSUInteger, AVAudioSessionRouteSharingPolicy) {
++    AVAudioSessionRouteSharingPolicyDefault = 0,
++    AVAudioSessionRouteSharingPolicyLongFormAudio = 1,
++    AVAudioSessionRouteSharingPolicyIndependent = 2,
++    AVAudioSessionRouteSharingPolicyLongFormVideo = 3,
++};
++
++@interface AVAudioSession (iOS11RoutingConfiguration)
++- (BOOL)setCategory:(AVAudioSessionCategory)category
++               mode:(AVAudioSessionMode)mode
++ routeSharingPolicy:(AVAudioSessionRouteSharingPolicy)policy
++            options:(AVAudioSessionCategoryOptions)options
++              error:(NSError **)outError;
++@end
++
++#endif
++
+ @interface SessionManager : NSObject
+ {
+     NSMutableSet *_registeredInstances;
+@@ -250,21 +275,25 @@ - (void)handleSpatialCapabilityChange:(NSNotification *)notification
+         return; /* Don't touch the number of channels for passthrough */
+ 
+     AVAudioSession *instance = p_sys->avInstance;
+-    NSInteger max_channel_count = [instance maximumOutputNumberOfChannels];
+-    unsigned channel_count = aout_FormatNbChannels(fmt);
+-
+-    /* Increase the preferred number of output channels if possible */
+-    if (channel_count > 2 && max_channel_count > 2)
++    /* No multichannel output selection before iOS 7 */
++    if (@available(iOS 7.0, tvOS 9.0, *))
+     {
+-        channel_count = __MIN(channel_count, max_channel_count);
+-        bool success = [instance setPreferredOutputNumberOfChannels:channel_count
+-                        error:nil];
+-        if (success && [instance outputNumberOfChannels] == channel_count)
+-            p_sys->b_preferred_channels_set = true;
+-        else
++        NSInteger max_channel_count = [instance maximumOutputNumberOfChannels];
++        unsigned channel_count = aout_FormatNbChannels(fmt);
++
++        /* Increase the preferred number of output channels if possible */
++        if (channel_count > 2 && max_channel_count > 2)
+         {
+-            /* Not critical, output channels layout will be Stereo */
+-            msg_Warn(p_aout, "setPreferredOutputNumberOfChannels failed");
++            channel_count = __MIN(channel_count, max_channel_count);
++            bool success = [instance setPreferredOutputNumberOfChannels:channel_count
++                            error:nil];
++            if (success && [instance outputNumberOfChannels] == channel_count)
++                p_sys->b_preferred_channels_set = true;
++            else
++            {
++                /* Not critical, output channels layout will be Stereo */
++                msg_Warn(p_aout, "setPreferredOutputNumberOfChannels failed");
++            }
+         }
+     }
+ }
+@@ -277,7 +306,8 @@ - (void)handleSpatialCapabilityChange:(NSNotification *)notification
+ 
+     if (p_sys->b_preferred_channels_set)
+     {
+-        [instance setPreferredOutputNumberOfChannels:2 error:nil];
++        if (@available(iOS 7.0, tvOS 9.0, *))
++            [instance setPreferredOutputNumberOfChannels:2 error:nil];
+         p_sys->b_preferred_channels_set = false;
+     }
+ }
+diff --git a/modules/audio_output/coreaudio_common.c b/modules/audio_output/coreaudio_common.c
+index 6046f7627b..1c701bb22e 100644
+--- a/modules/audio_output/coreaudio_common.c
++++ b/modules/audio_output/coreaudio_common.c
+@@ -73,37 +73,50 @@ ca_ClearOutBuffers(audio_output_t *p_aout)
+     p_sys->i_out_size = 0;
+ }
+ 
++/* os_unfair_lock is iOS 10 / macOS 10.12 and later, use a mutex before */
++#ifdef CA_HAVE_OS_UNFAIR_LOCK
++# define has_unfair_lock() likely(os_unfair_lock_lock != NULL)
++#else
++# define has_unfair_lock() false
++#endif
++
+ static void
+ lock_init(struct aout_sys_common *p_sys)
+ {
+-    if (likely(os_unfair_lock_lock))
++#ifdef CA_HAVE_OS_UNFAIR_LOCK
++    if (has_unfair_lock())
+         p_sys->lock.unfair = OS_UNFAIR_LOCK_INIT;
+     else
++#endif
+         vlc_mutex_init(&p_sys->lock.mutex);
+ }
+ 
+ static inline void
+ lock_destroy(struct aout_sys_common *p_sys)
+ {
+-    if (unlikely(!os_unfair_lock_lock))
++    if (!has_unfair_lock())
+         vlc_mutex_destroy(&p_sys->lock.mutex);
+ }
+ 
+ static inline void
+ lock_lock(struct aout_sys_common *p_sys)
+ {
+-    if (likely(os_unfair_lock_lock))
++#ifdef CA_HAVE_OS_UNFAIR_LOCK
++    if (has_unfair_lock())
+         os_unfair_lock_lock(&p_sys->lock.unfair);
+     else
++#endif
+         vlc_mutex_lock(&p_sys->lock.mutex);
+ }
+ 
+ static inline void
+ lock_unlock(struct aout_sys_common *p_sys)
+ {
+-    if (likely(os_unfair_lock_lock))
++#ifdef CA_HAVE_OS_UNFAIR_LOCK
++    if (has_unfair_lock())
+         os_unfair_lock_unlock(&p_sys->lock.unfair);
+     else
++#endif
+         vlc_mutex_unlock(&p_sys->lock.mutex);
+ }
+ 
+diff --git a/modules/audio_output/coreaudio_common.h b/modules/audio_output/coreaudio_common.h
+index bf5a0dcca2..9a53ff4c70 100644
+--- a/modules/audio_output/coreaudio_common.h
++++ b/modules/audio_output/coreaudio_common.h
+@@ -32,7 +32,10 @@
+ 
+ #import <AudioUnit/AudioUnit.h>
+ #import <AudioToolbox/AudioToolbox.h>
+-#import <os/lock.h>
++#if __has_include(<os/lock.h>)
++# import <os/lock.h>
++# define CA_HAVE_OS_UNFAIR_LOCK 1
++#endif
+ #import <mach/mach_time.h>
+ 
+ #define STREAM_FORMAT_MSG(pre, sfm) \
+@@ -69,10 +72,12 @@ struct aout_sys_common
+ 
+     union lock
+     {
++#ifdef CA_HAVE_OS_UNFAIR_LOCK
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wpartial-availability"
+         os_unfair_lock  unfair;
+ #pragma clang diagnostic pop
++#endif
+         pthread_mutex_t mutex;
+     } lock;
+ 
+diff --git a/modules/text_renderer/freetype/fonts/darwin.c b/modules/text_renderer/freetype/fonts/darwin.c
+index 010f702dd9..7719a7f4c3 100644
+--- a/modules/text_renderer/freetype/fonts/darwin.c
++++ b/modules/text_renderer/freetype/fonts/darwin.c
+@@ -66,7 +66,15 @@ static CFIndex getFontIndexInFontFile(const char* psz_filePath, const char* psz_
+     if (url == NULL) {
+         return kCFNotFound;
+     }
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wunguarded-availability"
++    /* weakly linked before iOS 7: use the file's first face there */
++    if (CTFontManagerCreateFontDescriptorsFromURL == NULL) {
++        CFRelease(url);
++        return 0;
++    }
+     CFArrayRef fontDescriptors = CTFontManagerCreateFontDescriptorsFromURL(url);
++#pragma clang diagnostic pop
+     if (fontDescriptors == NULL) {
+         CFRelease(url);
+         return kCFNotFound;
+-- 
+2.54.0 (Apple Git-157)
+

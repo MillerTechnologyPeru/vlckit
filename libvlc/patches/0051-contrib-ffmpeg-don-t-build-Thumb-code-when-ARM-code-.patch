@@ -1,0 +1,34 @@
+From 478f7fa1c56020b88374a1db20617801ab5e7059 Mon Sep 17 00:00:00 2001
+From: Alsey Coleman Miller <alseycmiller@gmail.com>
+Date: Thu, 5 Nov 2026 21:24:23 -0500
+Subject: [PATCH] contrib: ffmpeg: don't build Thumb code when ARM code is
+ asked for
+
+Respect -marm in CFLAGS instead of always passing --enable-thumb on
+ARMv7-A. Xcode 27's linker drops the Thumb bit from pointers to local
+Thumb functions, so armv7 iOS builds with it need ARM code.
+---
+ contrib/src/ffmpeg/rules.mak | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/contrib/src/ffmpeg/rules.mak b/contrib/src/ffmpeg/rules.mak
+index 6e4d66daa3..81712d30f7 100644
+--- a/contrib/src/ffmpeg/rules.mak
++++ b/contrib/src/ffmpeg/rules.mak
+@@ -94,9 +94,13 @@ FFMPEGCONF += --enable-small
+ endif
+ ifeq ($(ARCH),arm)
+ ifdef HAVE_ARMV7A
++# unless ARM code was asked for (-marm), as when the linker can't store
++# pointers to local Thumb functions correctly
++ifeq ($(findstring -marm,$(CFLAGS)),)
+ FFMPEGCONF += --enable-thumb
+ endif
+ endif
++endif
+ else
+ FFMPEGCONF += --optflags=-Og
+ endif
+-- 
+2.54.0 (Apple Git-157)
+

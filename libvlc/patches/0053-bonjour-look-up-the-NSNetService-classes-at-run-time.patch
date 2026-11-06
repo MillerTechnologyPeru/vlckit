@@ -1,0 +1,39 @@
+From fd825e1d17ce864f644dbbb8c4f1bb427ed3ff1b Mon Sep 17 00:00:00 2001
+From: Alsey Coleman Miller <alseycmiller@gmail.com>
+Date: Thu, 5 Nov 2026 21:39:37 -0500
+Subject: [PATCH] bonjour: look up the NSNetService classes at run time
+
+They were in Foundation up to iOS 6 and are in CFNetwork since, so a
+binary linked with a newer SDK binds them to CFNetwork and fails to
+launch on iOS 6.
+---
+ modules/services_discovery/bonjour.m | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/modules/services_discovery/bonjour.m b/modules/services_discovery/bonjour.m
+index 46cd95f94b..63a615741a 100644
+--- a/modules/services_discovery/bonjour.m
++++ b/modules/services_discovery/bonjour.m
+@@ -249,7 +249,9 @@ - (void)startDiscovery
+             continue;
+         }
+ 
+-        NSNetServiceBrowser *serviceBrowser = [[NSNetServiceBrowser alloc] init];
++        /* Looked up at run time: the classes moved from Foundation (iOS 6)
++         * to CFNetwork, so a link-time reference binds to the wrong one */
++        NSNetServiceBrowser *serviceBrowser = [[NSClassFromString(@"NSNetServiceBrowser") alloc] init];
+         [serviceBrowser setDelegate:self];
+         msg_Dbg(_p_this, "starting discovery for type %s", [[protocol objectForKey: VLCBonjourProtocolServiceName] UTF8String]);
+         [serviceBrowser searchForServicesOfType:[protocol objectForKey: VLCBonjourProtocolServiceName] inDomain:@"local."];
+@@ -360,7 +362,7 @@ - (void)addResolvedRendererItem:(NSNetService *)netService withProtocol:(NSStrin
+     if( [host rangeOfString:@":"].location != NSNotFound )
+         host = [NSString stringWithFormat:@"[%@]", host];
+     NSString *uri = [NSString stringWithFormat:@"%@://%@:%ld", protocol, host, (long)netService.port];
+-    NSDictionary *txtDict = [NSNetService dictionaryFromTXTRecordData:[netService TXTRecordData]];
++    NSDictionary *txtDict = [NSClassFromString(@"NSNetService") dictionaryFromTXTRecordData:[netService TXTRecordData]];
+     NSString *displayName = netService.name;
+     int rendererFlags = 0;
+ 
+-- 
+2.54.0 (Apple Git-157)
+

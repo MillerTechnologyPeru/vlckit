@@ -1,0 +1,36 @@
+From f420baac561f390ec8c4a6222cae82a9b66c518e Mon Sep 17 00:00:00 2001
+From: Alsey Coleman Miller <alseycmiller@gmail.com>
+Date: Thu, 5 Nov 2026 21:50:53 -0500
+Subject: [PATCH] coreaudio: don't fail on a missing channel layout property
+ for stereo
+
+RemoteIO on iOS 6 rejects kAudioUnitProperty_AudioChannelLayout with
+kAudioUnitErr_InvalidProperty, which made the output fail to open for
+streams VLC sets a layout for, such as AAC. Mono and stereo don't need
+one, and audiounit_ios downmixes anything else to stereo there.
+---
+ modules/audio_output/coreaudio_common.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/modules/audio_output/coreaudio_common.c b/modules/audio_output/coreaudio_common.c
+index 1c701bb22e..79fb74e56c 100644
+--- a/modules/audio_output/coreaudio_common.c
++++ b/modules/audio_output/coreaudio_common.c
+@@ -950,7 +950,13 @@ au_Initialize(audio_output_t *p_aout, AudioUnit au, audio_sample_format_t *fmt,
+                                    kAudioUnitScope_Input, 0, inlayout,
+                                    inlayout_size);
+         free(inlayout_buf);
+-        if (err != noErr)
++        if (err == kAudioUnitErr_InvalidProperty && desc.mChannelsPerFrame <= 2)
++        {
++            /* RemoteIO before iOS 7 has no channel layout property: mono and
++             * stereo need none */
++            ca_LogWarn("failed to setup input layout, using the default one");
++        }
++        else if (err != noErr)
+         {
+             ca_LogErr("failed to setup input layout");
+             return VLC_EGENERIC;
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,266 @@
+From dbfc4cb6ba88aa0fb17feeaab05e4d74791e2257 Mon Sep 17 00:00:00 2001
+From: Alsey Coleman Miller <alseycmiller@gmail.com>
+Date: Thu, 5 Nov 2026 21:43:40 -0500
+Subject: [PATCH] audiounit_ios: drain autoreleased objects of the audio
+ session calls
+
+The callers are libvlc threads, which have no autorelease pool on iOS 6
+(threads only get one implicitly from iOS 7), so the route and port
+objects leaked and the runtime logged every one.
+---
+ modules/audio_output/audiounit_ios.m | 204 ++++++++++++++-------------
+ 1 file changed, 108 insertions(+), 96 deletions(-)
+
+diff --git a/modules/audio_output/audiounit_ios.m b/modules/audio_output/audiounit_ios.m
+index d710e5e823..94b0d22fe7 100644
+--- a/modules/audio_output/audiounit_ios.m
++++ b/modules/audio_output/audiounit_ios.m
+@@ -269,30 +269,33 @@ - (void)handleSpatialCapabilityChange:(NSNotification *)notification
+ avas_setPreferredNumberOfChannels(audio_output_t *p_aout,
+                                   const audio_sample_format_t *fmt)
+ {
+-    struct aout_sys_t *p_sys = p_aout->sys;
+-
+-    if (aout_BitsPerSample(fmt->i_format) == 0)
+-        return; /* Don't touch the number of channels for passthrough */
++    /* iOS 6 gives threads no autorelease pool of their own */
++    @autoreleasepool {
++        struct aout_sys_t *p_sys = p_aout->sys;
+ 
+-    AVAudioSession *instance = p_sys->avInstance;
+-    /* No multichannel output selection before iOS 7 */
+-    if (@available(iOS 7.0, tvOS 9.0, *))
+-    {
+-        NSInteger max_channel_count = [instance maximumOutputNumberOfChannels];
+-        unsigned channel_count = aout_FormatNbChannels(fmt);
++        if (aout_BitsPerSample(fmt->i_format) == 0)
++            return; /* Don't touch the number of channels for passthrough */
+ 
+-        /* Increase the preferred number of output channels if possible */
+-        if (channel_count > 2 && max_channel_count > 2)
++        AVAudioSession *instance = p_sys->avInstance;
++        /* No multichannel output selection before iOS 7 */
++        if (@available(iOS 7.0, tvOS 9.0, *))
+         {
+-            channel_count = __MIN(channel_count, max_channel_count);
+-            bool success = [instance setPreferredOutputNumberOfChannels:channel_count
+-                            error:nil];
+-            if (success && [instance outputNumberOfChannels] == channel_count)
+-                p_sys->b_preferred_channels_set = true;
+-            else
++            NSInteger max_channel_count = [instance maximumOutputNumberOfChannels];
++            unsigned channel_count = aout_FormatNbChannels(fmt);
++
++            /* Increase the preferred number of output channels if possible */
++            if (channel_count > 2 && max_channel_count > 2)
+             {
+-                /* Not critical, output channels layout will be Stereo */
+-                msg_Warn(p_aout, "setPreferredOutputNumberOfChannels failed");
++                channel_count = __MIN(channel_count, max_channel_count);
++                bool success = [instance setPreferredOutputNumberOfChannels:channel_count
++                                error:nil];
++                if (success && [instance outputNumberOfChannels] == channel_count)
++                    p_sys->b_preferred_channels_set = true;
++                else
++                {
++                    /* Not critical, output channels layout will be Stereo */
++                    msg_Warn(p_aout, "setPreferredOutputNumberOfChannels failed");
++                }
+             }
+         }
+     }
+@@ -301,50 +304,56 @@ - (void)handleSpatialCapabilityChange:(NSNotification *)notification
+ static void
+ avas_resetPreferredNumberOfChannels(audio_output_t *p_aout)
+ {
+-    struct aout_sys_t *p_sys = p_aout->sys;
+-    AVAudioSession *instance = p_sys->avInstance;
++    /* iOS 6 gives threads no autorelease pool of their own */
++    @autoreleasepool {
++        struct aout_sys_t *p_sys = p_aout->sys;
++        AVAudioSession *instance = p_sys->avInstance;
+ 
+-    if (p_sys->b_preferred_channels_set)
+-    {
+-        if (@available(iOS 7.0, tvOS 9.0, *))
+-            [instance setPreferredOutputNumberOfChannels:2 error:nil];
+-        p_sys->b_preferred_channels_set = false;
++        if (p_sys->b_preferred_channels_set)
++        {
++            if (@available(iOS 7.0, tvOS 9.0, *))
++                [instance setPreferredOutputNumberOfChannels:2 error:nil];
++            p_sys->b_preferred_channels_set = false;
++        }
+     }
+ }
+ 
+ static int
+ avas_GetPortType(audio_output_t *p_aout, enum port_type *pport_type)
+ {
+-    struct aout_sys_t * p_sys = p_aout->sys;
+-    AVAudioSession *instance = p_sys->avInstance;
+-    *pport_type = PORT_TYPE_DEFAULT;
++    /* iOS 6 gives threads no autorelease pool of their own */
++    @autoreleasepool {
++        struct aout_sys_t * p_sys = p_aout->sys;
++        AVAudioSession *instance = p_sys->avInstance;
++        *pport_type = PORT_TYPE_DEFAULT;
++
++        long last_channel_count = 0;
++        for (AVAudioSessionPortDescription *out in [[instance currentRoute] outputs])
++        {
++            /* Choose the layout with the biggest number of channels or the HDMI
++             * one */
++
++            enum port_type port_type;
++            if ([out.portType isEqualToString: AVAudioSessionPortUSBAudio])
++                port_type = PORT_TYPE_USB;
++            else if ([out.portType isEqualToString: AVAudioSessionPortHDMI])
++                port_type = PORT_TYPE_HDMI;
++            else if ([out.portType isEqualToString: AVAudioSessionPortHeadphones])
++                port_type = PORT_TYPE_HEADPHONES;
++            else
++                port_type = PORT_TYPE_DEFAULT;
+ 
+-    long last_channel_count = 0;
+-    for (AVAudioSessionPortDescription *out in [[instance currentRoute] outputs])
+-    {
+-        /* Choose the layout with the biggest number of channels or the HDMI
+-         * one */
+-
+-        enum port_type port_type;
+-        if ([out.portType isEqualToString: AVAudioSessionPortUSBAudio])
+-            port_type = PORT_TYPE_USB;
+-        else if ([out.portType isEqualToString: AVAudioSessionPortHDMI])
+-            port_type = PORT_TYPE_HDMI;
+-        else if ([out.portType isEqualToString: AVAudioSessionPortHeadphones])
+-            port_type = PORT_TYPE_HEADPHONES;
+-        else
+-            port_type = PORT_TYPE_DEFAULT;
+-
+-        if (@available(iOS 15.0, tvOS 15.0, *)) {
+-            p_sys->b_spatial_audio_supported = out.spatialAudioEnabled;
++            if (@available(iOS 15.0, tvOS 15.0, *)) {
++                p_sys->b_spatial_audio_supported = out.spatialAudioEnabled;
++            }
++
++            *pport_type = port_type;
++            if (port_type == PORT_TYPE_HDMI) /* Prefer HDMI */
++                break;
+         }
+ 
+-        *pport_type = port_type;
+-        if (port_type == PORT_TYPE_HDMI) /* Prefer HDMI */
+-            break;
++        return VLC_SUCCESS;
+     }
+-
+-    return VLC_SUCCESS;
+ }
+ 
+ struct role2policy
+@@ -403,55 +412,58 @@ static int role2policy_cmp(const void *key, const void *val)
+ static int
+ avas_SetActive(audio_output_t *p_aout, bool active, NSUInteger options)
+ {
+-    struct aout_sys_t * p_sys = p_aout->sys;
+-    AVAudioSession *instance = p_sys->avInstance;
+-    BOOL ret = false;
+-    NSError *error = nil;
+-
+-    if (active)
+-    {
+-        AVAudioSessionCategory category = AVAudioSessionCategoryPlayback;
+-        AVAudioSessionMode mode = AVAudioSessionModeMoviePlayback;
+-        AVAudioSessionRouteSharingPolicy policy = GetRouteSharingPolicy(p_aout);
+-
+-        if (@available(iOS 11.0, tvOS 11.0, *))
++    /* iOS 6 gives threads no autorelease pool of their own */
++    @autoreleasepool {
++        struct aout_sys_t * p_sys = p_aout->sys;
++        AVAudioSession *instance = p_sys->avInstance;
++        BOOL ret = false;
++        NSError *error = nil;
++
++        if (active)
+         {
+-            ret = [instance setCategory:category
+-                                   mode:mode
+-                     routeSharingPolicy:policy
+-                                options:0
+-                                  error:&error];
++            AVAudioSessionCategory category = AVAudioSessionCategoryPlayback;
++            AVAudioSessionMode mode = AVAudioSessionModeMoviePlayback;
++            AVAudioSessionRouteSharingPolicy policy = GetRouteSharingPolicy(p_aout);
++
++            if (@available(iOS 11.0, tvOS 11.0, *))
++            {
++                ret = [instance setCategory:category
++                                       mode:mode
++                         routeSharingPolicy:policy
++                                    options:0
++                                      error:&error];
++            }
++            else
++            {
++                ret = [instance setCategory:category
++                                      error:&error];
++                ret = ret && [instance setMode:mode error:&error];
++                /* Not AVAudioSessionRouteSharingPolicy on older devices */
++            }
++            if (@available(iOS 15.0, tvOS 15.0, *)) {
++                ret = ret && [instance setSupportsMultichannelContent:p_sys->b_spatial_audio_supported error:&error];
++            }
++            ret = ret && [instance setActive:YES withOptions:options error:&error];
++            if (ret)
++                [[SessionManager sharedInstance] addAoutInstance: p_sys->aoutWrapper];
++        } else {
++            NSInteger numberOfRegisteredInstances = [[SessionManager sharedInstance] removeAoutInstance: p_sys->aoutWrapper];
++            if (numberOfRegisteredInstances == 0) {
++                ret = [instance setActive:NO withOptions:options error:&error];
++            } else {
++                ret = true;
++            }
+         }
+-        else
++
++        if (!ret)
+         {
+-            ret = [instance setCategory:category
+-                                  error:&error];
+-            ret = ret && [instance setMode:mode error:&error];
+-            /* Not AVAudioSessionRouteSharingPolicy on older devices */
+-        }
+-        if (@available(iOS 15.0, tvOS 15.0, *)) {
+-            ret = ret && [instance setSupportsMultichannelContent:p_sys->b_spatial_audio_supported error:&error];
+-        }
+-        ret = ret && [instance setActive:YES withOptions:options error:&error];
+-        if (ret)
+-            [[SessionManager sharedInstance] addAoutInstance: p_sys->aoutWrapper];
+-    } else {
+-        NSInteger numberOfRegisteredInstances = [[SessionManager sharedInstance] removeAoutInstance: p_sys->aoutWrapper];
+-        if (numberOfRegisteredInstances == 0) {
+-            ret = [instance setActive:NO withOptions:options error:&error];
+-        } else {
+-            ret = true;
++            msg_Err(p_aout, "AVAudioSession playback change failed: %s(%d)",
++                    error.domain.UTF8String, (int)error.code);
++            return VLC_EGENERIC;
+         }
+-    }
+ 
+-    if (!ret)
+-    {
+-        msg_Err(p_aout, "AVAudioSession playback change failed: %s(%d)",
+-                error.domain.UTF8String, (int)error.code);
+-        return VLC_EGENERIC;
++        return VLC_SUCCESS;
+     }
+-
+-    return VLC_SUCCESS;
+ }
+ 
+ #pragma mark -
+-- 
+2.54.0 (Apple Git-157)
+
