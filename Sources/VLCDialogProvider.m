@@ -40,7 +40,7 @@
         return [[VLCCustomDialogProvider alloc] initWithLibrary:library];
 
     #if !TARGET_OS_TV
-        if ([UIAlertController class]) {
+        if (@available(iOS 8.0, *)) {
             return [[VLCEmbeddedDialogProvider alloc] initWithLibrary:library];
         } else {
             return [[VLCiOSLegacyDialogProvider alloc] initWithLibrary:library];

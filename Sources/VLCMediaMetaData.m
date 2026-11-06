@@ -37,9 +37,8 @@
     if (self = [super init]) {
         _media = media;
         _metaCache = @{}.mutableCopy;
-        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT,
-                                                                             QOS_CLASS_UTILITY,
-                                                                             0);
+        dispatch_queue_attr_t attr = VLCQueueAttrWithQOS(DISPATCH_QUEUE_CONCURRENT,
+                                                                 0x11 /* QOS_CLASS_UTILITY */);
         _metaCacheAccessQueue = dispatch_queue_create("VLCKit.VLCMediaMetaData.metaCacheAccessQueue", attr);
     }
     return self;

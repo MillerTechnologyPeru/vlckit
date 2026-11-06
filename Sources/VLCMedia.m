@@ -375,7 +375,16 @@ static void HandleMediaParsedChanged(const libvlc_event_t * event, void * opaque
 
 - (NSString *)description
 {
-    return [NSString stringWithFormat:@"<%@ %p>, md: %p, url: %@", [self class], self, p_md, [[_url absoluteString] stringByRemovingPercentEncoding]];
+    NSString *url;
+    if (@available(iOS 7.0, macOS 10.9, *)) {
+        url = [[_url absoluteString] stringByRemovingPercentEncoding];
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        url = [[_url absoluteString] stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+#pragma clang diagnostic pop
+    }
+    return [NSString stringWithFormat:@"<%@ %p>, md: %p, url: %@", [self class], self, p_md, url];
 }
 
 - (NSComparisonResult)compare:(nullable VLCMedia *)media

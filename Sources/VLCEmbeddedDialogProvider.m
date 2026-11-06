@@ -40,6 +40,11 @@
 
 @end
 
+/* These callbacks are only registered by a VLCEmbeddedDialogProvider, which
+ * VLCDialogProvider creates on iOS 8 and later only. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability"
+
 static void displayErrorCallback(void *p_data,
                                  const char *psz_title,
                                  const char *psz_text)
@@ -141,6 +146,7 @@ static void updateProgressCallback(void *p_data,
                                       waitUntilDone:NO];
     }
 }
+#pragma clang diagnostic pop
 
 @implementation VLCEmbeddedDialogProvider
 
@@ -190,7 +196,7 @@ static void updateProgressCallback(void *p_data,
                                                      style:UIAlertActionStyleDestructive
                                                    handler:nil];
     [alertController addAction:action];
-    if ([alertController respondsToSelector:@selector(setPreferredAction:)]) {
+    if (@available(iOS 9.0, tvOS 9.0, *)) {
         [alertController setPreferredAction:action];
     }
     [[[[UIApplication sharedApplication].delegate.window rootViewController] presentedViewController] presentViewController:alertController
@@ -230,7 +236,7 @@ static void updateProgressCallback(void *p_data,
                                                                                      NO);
                                                         }];
     [alertController addAction:loginAction];
-    if ([alertController respondsToSelector:@selector(setPreferredAction:)]) {
+    if (@available(iOS 9.0, tvOS 9.0, *)) {
         [alertController setPreferredAction:loginAction];
     }
 
@@ -279,7 +285,7 @@ static void updateProgressCallback(void *p_data,
                                                               libvlc_dialog_post_action([dialogData[0] pointerValue], 1);
                                                           }];
         [alertController addAction:yesAction];
-        if ([alertController respondsToSelector:@selector(setPreferredAction:)]) {
+        if (@available(iOS 9.0, tvOS 9.0, *)) {
             [alertController setPreferredAction:yesAction];
         }
     }

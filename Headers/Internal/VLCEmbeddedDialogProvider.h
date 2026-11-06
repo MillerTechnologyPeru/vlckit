@@ -23,6 +23,7 @@
 
 #import <VLCDialogProvider.h>
 
+__attribute__((availability(ios, introduced=8.0)))
 @interface VLCEmbeddedDialogProvider : VLCDialogProvider
 
 /**

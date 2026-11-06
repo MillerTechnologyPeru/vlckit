@@ -50,6 +50,7 @@
 #  import <CoreServices/../Frameworks/OSServices.framework/Headers/Power.h>
 # endif
 #else
+#import <AVFoundation/AVFoundation.h>
 #import <AVKit/AVKit.h>
 #endif // !TARGET_OS_IPHONE
 
@@ -1098,7 +1099,7 @@ static void HandleMediaPlayerRecord(const libvlc_event_t * event, void * opaque)
 
 - (BOOL)equalizerEnabled
 {
-    return _equalizer;
+    return _equalizer != nil;
 }
 
 - (NSArray *)equalizerProfiles
@@ -1689,8 +1690,10 @@ static void HandleMediaPlayerRecord(const libvlc_event_t * event, void * opaque)
 {
     NSDictionary *userInfo = notification.userInfo;
     NSInteger routeChangeReason = [[userInfo valueForKey:AVAudioSessionRouteChangeReasonKey] integerValue];
-    if (routeChangeReason == AVAudioSessionRouteChangeReasonRouteConfigurationChange) {
-        return;
+    if (@available(iOS 7.0, *)) {
+        if (routeChangeReason == AVAudioSessionRouteChangeReasonRouteConfigurationChange) {
+            return;
+        }
     }
     [self readjustAudioDelayIfNeeded];
 }

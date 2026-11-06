@@ -26,3 +26,10 @@
 NSString *toNSStr(const char *str) {
     return str != NULL ? [NSString stringWithUTF8String:str] : @"";
 }
+
+dispatch_queue_attr_t VLCQueueAttrWithQOS(dispatch_queue_attr_t attr, int qosClass)
+{
+    if (@available(iOS 8.0, macOS 10.10, tvOS 9.0, *))
+        return dispatch_queue_attr_make_with_qos_class(attr, (dispatch_qos_class_t)qosClass, 0);
+    return attr;
+}

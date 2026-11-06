@@ -141,9 +141,8 @@ static void HandleMediaListItemDeleted( const libvlc_event_t * event, void * opa
         _mediaObjects = [[NSMutableArray alloc] init];
 
 
-        dispatch_queue_attr_t qosAttribute = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
-                                                                                     DISPATCH_QUEUE_PRIORITY_LOW,
-                                                                                     0);
+        dispatch_queue_attr_t qosAttribute = VLCQueueAttrWithQOS(DISPATCH_QUEUE_SERIAL,
+                                                                         DISPATCH_QUEUE_PRIORITY_LOW);
         _serialMediaObjectsQueue = dispatch_queue_create("org.videolan.serialMediaObjectsQueue", qosAttribute);
 
         [self initInternalMediaList];
@@ -297,9 +296,8 @@ static void HandleMediaListItemDeleted( const libvlc_event_t * event, void * opa
         libvlc_media_list_lock( p_mlist );
         NSUInteger count = (NSUInteger)libvlc_media_list_count(p_mlist);
         _mediaObjects = [[NSMutableArray alloc] initWithCapacity: count];
-        dispatch_queue_attr_t qosAttribute = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
-                                                                                     DISPATCH_QUEUE_PRIORITY_LOW,
-                                                                                     0);
+        dispatch_queue_attr_t qosAttribute = VLCQueueAttrWithQOS(DISPATCH_QUEUE_SERIAL,
+                                                                         DISPATCH_QUEUE_PRIORITY_LOW);
         _serialMediaObjectsQueue = dispatch_queue_create("org.videolan.serialMediaObjectsQueue", qosAttribute);
         
         for (int i = 0; i < count; i++) {

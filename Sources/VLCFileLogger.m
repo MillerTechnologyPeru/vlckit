@@ -56,9 +56,13 @@
                                                       logLevel:level
                                                        context:context];
     NSData *messageData = [formattedMessage dataUsingEncoding:NSUTF8StringEncoding];
+#if (defined(__IPHONE_13_0) && __IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_13_0) \
+    || (defined(__MAC_10_15) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_10_15)
     if (@available(iOS 13.0, tvOS 13.0, macOS 10.15, *)) {
         [_fileHandle writeData:messageData error:nil];
-    } else {
+    } else
+#endif
+    {
         @try {
             [_fileHandle writeData:messageData];
         } @catch (NSException *exception) {

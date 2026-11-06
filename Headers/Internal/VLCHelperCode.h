@@ -24,3 +24,9 @@
 #import <Foundation/Foundation.h>
 
 NSString *toNSStr(const char *str);
+
+/**
+ * Returns attr with the given QoS class where the OS supports it (iOS 8,
+ * macOS 10.10, tvOS 9), and attr unchanged before.
+ */
+dispatch_queue_attr_t VLCQueueAttrWithQOS(dispatch_queue_attr_t attr, int qosClass);

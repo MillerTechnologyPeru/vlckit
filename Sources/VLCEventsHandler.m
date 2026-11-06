@@ -44,7 +44,7 @@
         _object = object;
         _configuration = configuration;
         // FIXME: on iOS 10/macOS 10.12/tvOS 10 we could use DISPATCH_QUEUE_SERIAL_WITH_AUTORELEASE_POOL
-        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);
+        dispatch_queue_attr_t attr = VLCQueueAttrWithQOS(DISPATCH_QUEUE_SERIAL, 0x19 /* QOS_CLASS_USER_INITIATED */);
         _releaseQueue = dispatch_queue_create("handler.releaseQueue", attr);
     }
     return self;
