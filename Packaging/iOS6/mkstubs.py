@@ -12,11 +12,18 @@ libSystem's sub-libraries are flattened into one libSystem stub: binaries
 bind to libSystem.B.dylib anyway, and dyld finds each symbol through its
 re-exports at run time.
 
-usage: mkstubs.py <exports.txt> <out dir>
+With --sdk, the stubs also list the SDK's symbols. That's for linking apps:
+@available fallbacks reference newer symbols weakly, and a weak reference
+still needs a definition at link time. check_imports.py then makes sure
+that every strong import exists on iOS 6.
+
+usage: mkstubs.py [--sdk <sdk>] <exports.txt> <out dir>
 """
 
 import collections
+import glob
 import os
+import re
 import sys
 
 LIBSYSTEM = "/usr/lib/libSystem.B.dylib"
@@ -55,6 +62,42 @@ def read(path):
     return symbols
 
 
+def sdk_symbols(sdk, install_name):
+    """Symbols the SDK's .tbd stubs export for an install name (armv7)."""
+    lib = os.path.join(sdk, "usr", "lib")
+    if install_name == LIBSYSTEM:
+        # not libcompiler_rt: compiler builtins iOS 6 lacks (__extendhfsf2...)
+        # must come from the static compiler-rt instead
+        files = [os.path.join(lib, "libSystem.B.tbd")] + \
+            [f for f in glob.glob(os.path.join(lib, "system", "*.tbd"))
+             if os.path.basename(f) != "libcompiler_rt.tbd"]
+    else:
+        files = [os.path.join(lib, os.path.basename(install_name).rsplit(".dylib", 1)[0] + ".tbd")]
+    symbols = set()
+    for path in files:
+        if not os.path.exists(path):
+            continue
+        text = open(path).read()
+        for block in re.split(r"\n  - archs:", text)[1:]:
+            archs, _, body = block.partition("\n")
+            if "armv7" not in archs:
+                continue
+            for key in ("symbols", "objc-classes", "objc-ivars", "weak-def-symbols"):
+                for m in re.finditer(r"\b%s:\s*\[(.*?)\]" % key, body, re.S):
+                    for name in m.group(1).replace("\n", " ").split(","):
+                        name = name.strip().strip("'\"")
+                        if not name:
+                            continue
+                        if key == "objc-classes":
+                            for prefix in ("_OBJC_CLASS_$", "_OBJC_METACLASS_$"):
+                                symbols.add(prefix + name)
+                        elif key == "objc-ivars":
+                            symbols.add("_OBJC_IVAR_$" + name)
+                        else:
+                            symbols.add(name)
+    return symbols
+
+
 def tbd(install_name, symbols):
     lines = [
         "---",
@@ -73,15 +116,23 @@ def tbd(install_name, symbols):
 
 
 def main():
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    sdk = None
+    if args[:1] == ["--sdk"]:
+        sdk = args[1]
+        args = args[2:]
+    if len(args) != 2:
         sys.exit(__doc__.strip().splitlines()[-1])
-    symbols = read(sys.argv[1])
-    libdir = os.path.join(sys.argv[2], "usr", "lib")
+    symbols = read(args[0])
+    libdir = os.path.join(args[1], "usr", "lib")
     os.makedirs(libdir, exist_ok=True)
     for install_name, files in NAMES.items():
         if not symbols.get(install_name):
             sys.exit("no symbols for %s in %s" % (install_name, sys.argv[1]))
-        text = tbd(install_name, symbols[install_name])
+        names = symbols[install_name]
+        if sdk:
+            names = names | sdk_symbols(sdk, install_name)
+        text = tbd(install_name, names)
         for name in files:
             with open(os.path.join(libdir, name), "w") as f:
                 f.write(text)

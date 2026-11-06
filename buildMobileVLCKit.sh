@@ -300,6 +300,8 @@ buildxcodeproj()
 spushd .
 ROOT_DIR=`pwd`
 spopd
+# reconfigure libvlc when this script changes
+THIS_SCRIPT_PATH="${ROOT_DIR}/`basename "$0"`"
 
 # get python installation
 python3Path=$(echo /Library/Frameworks/Python.framework/Versions/3.*/bin | awk '{print $1;}')
@@ -389,9 +391,12 @@ prepareIOS6Toolchain() {
         tar -xJf "${tarball}" -C "${IOS6_DIR}"
     fi
 
-    # Link stubs with what iOS 6.1.6 really exports
+    # Link stubs with what iOS 6.1.6 really exports, for building libvlc
     python3 -I "${ROOT_DIR}/Packaging/iOS6/mkstubs.py" \
         "${ROOT_DIR}/Packaging/iOS6/ios-6.1.6-armv7-exports.txt" "${IOS6_DIR}/stubs"
+    # and with the SDK's symbols too, for linking apps (weak references)
+    python3 -I "${ROOT_DIR}/Packaging/iOS6/mkstubs.py" --sdk "${IOS6_SDKROOT:-${ROOT_DIR}/../Swift-iOS6/sdk/iPhoneOS9.3.sdk}" \
+        "${ROOT_DIR}/Packaging/iOS6/ios-6.1.6-armv7-exports.txt" "${IOS6_DIR}/link-stubs"
 }
 
 buildLibVLC() {
@@ -492,6 +497,10 @@ buildLibVLC() {
         EXTRA_CFLAGS+=" -marm"
         # iOS 6's own symbols first. Its libc++ doesn't re-export libc++abi.
         EXTRA_LDFLAGS+=" -L${IOS6_STUBS} -lc++abi"
+        # ARC code is fine, but linking with -fobjc-arc makes clang add
+        # libarclite below iOS 9, which Xcode no longer has. iOS 6's
+        # libobjc has the ARC entry points itself.
+        EXTRA_LDFLAGS+=" -fno-objc-arc"
         IOS6_CXXFLAGS="-stdlib=libc++ -nostdinc++ -isystem ${IOS6_LIBCXX}"
     fi
     PLATFORM_VERSION="-platform_version,${OSVERSIONMINLDFLAG},${SDK_MIN},${SDK_VERSION}"
@@ -742,6 +751,11 @@ buildLibVLC() {
         export ac_cv_arm_neon=no
     fi
 
+    if [ "$IOS6" = "yes" ]; then
+        # VideoToolbox is iOS 8+, decode in software with libavcodec
+        export ac_cv_header_VideoToolbox_VideoToolbox_h=no
+    fi
+
     # Available but not authorized
     export ac_cv_func_daemon=no
     export ac_cv_func_fork=no
@@ -816,6 +830,10 @@ buildLibVLC() {
     cp -R "${VLCROOT}/contrib/${OSSTYLE}${PLATFORM_IDENTIFIER}-${HOST_TRIPLET}-${ARCH}" "${PREFIX}/contribs"
 
     info "Removing unneeded modules"
+    if [ "$IOS6" = "yes" ]; then
+        # needs kCIOutputImageKey, which iOS 6's CoreImage doesn't export
+        find ${PREFIX}/lib/vlc/plugins -name "*ci_filters*" -type f -exec rm '{}' \;
+    fi
     blacklist="
     stats
     access_bd
@@ -1269,7 +1287,8 @@ buildStaticFrameworkForIOS6() {
         -include ${ROOT_DIR}/Headers/PCH/MobilePrefix.pch
         -I${ROOT_DIR}/Headers/Public -I${ROOT_DIR}/Headers/Internal -I${ROOT_DIR}/Headers
         -I${ROOT_DIR}/Resources/MobileVLCKit
-        -I${VLCROOT}/install-iPhoneOS/armv7/include"
+        -I${VLCROOT}/install-iPhoneOS/armv7/include
+        -I${VLCROOT}/install-iPhoneOS/armv7/include/vlc/plugins"
 
     # the MobileVLCKit target's sources
     local SOURCES="VLCAdjustFilter VLCAudio VLCAudioEqualizer VLCConsoleLogger
@@ -1288,11 +1307,23 @@ buildStaticFrameworkForIOS6() {
         xcrun clang -c -x objective-c $CFLAGS "${ROOT_DIR}/Sources/${src}.m" -o "${OBJDIR}/${src}.o"
         objects="$objects ${OBJDIR}/${src}.o"
     done
+    # @available support that works on iOS 6, instead of compiler-rt's
+    xcrun clang -c -arch armv7 -marm -isysroot "${SDKROOT}" -miphoneos-version-min=${SDK_MIN} -Os -g \
+        -Werror=unguarded-availability "${ROOT_DIR}/Packaging/iOS6/availability.c" -o "${OBJDIR}/availability.o"
+    objects="$objects ${OBJDIR}/availability.o"
 
     # libvlc, libvlccore, compat, the plugins and the contribs, from the
     # list collect_symbols_and_libraries wrote for Xcode
-    local libs=`grep '^VLC_PLUGINS_DEVICE_LDFLAGS=' "${ROOT_DIR}/Resources/MobileVLCKit/vlc-plugins-iPhone.xcconfig" \
-        | sed -e 's/^VLC_PLUGINS_DEVICE_LDFLAGS=//' -e "s|\$(PROJECT_DIR)|${ROOT_DIR}|g"`
+    local libs=$(grep '^VLC_PLUGINS_DEVICE_LDFLAGS=' "${ROOT_DIR}/Resources/MobileVLCKit/vlc-plugins-iPhone.xcconfig" \
+        | sed -e 's/^VLC_PLUGINS_DEVICE_LDFLAGS=//' -e 's|\$(PROJECT_DIR)|'"${ROOT_DIR}"'|g')
+    local lib
+    for lib in $libs; do
+        if [ ! -f "$lib" ]; then
+            echo "*** missing library $lib ***"
+            exit 1
+        fi
+    done
+    info "Merging `echo $libs | wc -w | tr -d ' '` libraries"
 
     xcrun libtool -static -arch_only armv7 -no_warning_for_no_symbols \
         -o "${FRAMEWORK}/MobileVLCKit" $objects $libs

@@ -12,8 +12,31 @@ brew install autoconf automake libtool pkg-config yasm nasm ragel make
 VLC_PATH=/opt/homebrew/opt/make/libexec/gnubin ./buildMobileVLCKit.sh -6
 ```
 
-Apps link it with `-framework MobileVLCKit -lc++ -lc++abi -liconv -lbz2 -lz`
-plus the system frameworks it uses, and must be ARM code (`-marm`), not Thumb.
+## Linking an app
+
+See `test/Makefile`, which builds `vlcplay` this way:
+
+- Compile ARM code (`-marm`), not Thumb.
+- Link with `-L build/iOS6/link-stubs/usr/lib -framework MobileVLCKit -lc++
+  -lc++abi -liconv -lbz2 -lz -lresolv -lsqlite3` and the system frameworks
+  listed there. Not `AudioUnit.framework`, which iOS 6 doesn't have (its API
+  is in AudioToolbox), and not `-fobjc-arc` on the link line (clang would add
+  libarclite, which Xcode no longer ships; compiling with ARC is fine).
+- Check the result with `check_imports.py ios-6.1.6-armv7-exports.txt <app>`:
+  it fails if a strong import doesn't exist on iOS 6, which would keep dyld
+  from launching the app.
+
+## Testing on a device
+
+```bash
+cd Packaging/iOS6/test
+make run MEDIA=movie.mp4          # VLCPLAY_VERBOSE=1 for libvlc's log
+```
+
+On an iPod touch 4 (iOS 6.1.6) MP3, H.264/AAC MP4 and VP8/Opus MKV files
+play to the end. The first video takes about 4 s to start while the
+freetype text renderer builds its font list through CoreText;
+`--text-renderer=none` avoids the wait.
 
 ## Why each step is there
 
@@ -37,5 +60,24 @@ plus the system frameworks it uses, and must be ARM code (`-marm`), not Thumb.
   `0049-*` does the same for libgcrypt and fixes two contribs' OS checks.
 - **Availability.** `-Werror=unguarded-availability` turns any API newer than
   iOS 6 into a compile error. VLCKit falls back to `UIAlertView` dialogs and
-  plain dispatch queues before iOS 8, and librist (whose mbedtls needs
-  `clock_gettime`, iOS 10) is left out.
+  plain dispatch queues before iOS 8. Left out: librist (its mbedtls needs
+  `clock_gettime`, iOS 10), VideoToolbox (iOS 8, libavcodec decodes in
+  software) and the CoreImage filters (iOS 6's CoreImage lacks
+  `kCIOutputImageKey`).
+- **`@available`.** compiler-rt's support for it needs iOS 14's
+  `_availability_version_check` and is Thumb code, so the framework brings
+  its own `__isOSVersionAtLeast` (`availability.c`).
+- **Two sets of stubs.** `build/iOS6/stubs` lists only what iOS 6 exports and
+  is used to build libvlc, so configure checks are exact.
+  `build/iOS6/link-stubs` adds the SDK's symbols, as `@available` fallbacks
+  reference newer symbols weakly and those still need a definition at link
+  time; `check_imports.py` then rejects strong references iOS 6 can't
+  satisfy.
+- **Linker workarounds.** ffmpeg's ARM assembly labels its GOT pointers
+  `.Lpic`, a named symbol on Mach-O, which makes Xcode 27's ld assert; they
+  use the Mach-O private prefix `L` instead. libvlc's Bonjour module looks up
+  `NSNetService` at run time, as it moved from Foundation (iOS 6) to
+  CFNetwork.
+- **No implicit autorelease pools.** iOS 6 threads have none, so the iOS
+  audio output drains its AVAudioSession objects itself, and RemoteIO there
+  has no channel layout property, which mono and stereo don't need.
