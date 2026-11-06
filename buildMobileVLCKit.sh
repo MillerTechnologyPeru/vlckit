@@ -26,6 +26,7 @@ ROOT_DIR=empty
 INCLUDE_32BIT=no
 FARCH="all"
 
+IOS6=no
 TESTEDHASH="6de05adc" # libvlc hash that this version of VLCKit is build on
 
 if [ -z "$MAKE_JOBS" ]; then
@@ -52,10 +53,11 @@ OPTIONS
    -b       Enable bitcode
    -a       Build framework for specific arch (all|x86_64|armv7|armv7s|aarch64)
    -3       Include optional 32bit slices (ARMv7 and ARMv7s, iOS only)
+   -6       Build libvlc for iOS 6 (armv7 only) with the SDK at \$IOS6_SDKROOT
 EOF
 }
 
-while getopts "hvwsfbdx3ntlk:a:" OPTION
+while getopts "hvwsfbdx36ntlk:a:" OPTION
 do
      case $OPTION in
          h)
@@ -119,6 +121,14 @@ do
              ;;
          3)
              INCLUDE_32BIT=yes
+             ;;
+         6)
+             IOS6=yes
+             INCLUDE_32BIT=yes
+             BUILD_SIMULATOR=no
+             BUILD_DYNAMIC_FRAMEWORK=no
+             FARCH=armv7
+             SDK_MIN=6.0
              ;;
          ?)
              usage
@@ -352,6 +362,38 @@ if [ "$SKIPLIBVLCCOMPILATION" != "yes" ]; then
     spopd #libvlc/vlc/extras/tools
 fi
 
+IOS6_LIBCXX_VERSION=3.8.0
+IOS6_LIBCXX_SHA256=36804511b940bc8a7cefc7cb391a6b28f5e3f53f6372965642020db91174237b
+
+prepareIOS6Toolchain() {
+    IOS6_DIR="${ROOT_DIR}/build/iOS6"
+    IOS6_STUBS="${IOS6_DIR}/stubs/usr/lib"
+    IOS6_LIBCXX="${IOS6_DIR}/libcxx-${IOS6_LIBCXX_VERSION}.src/include"
+    mkdir -p "${IOS6_DIR}"
+
+    # Xcode's libc++ headers no longer support iOS 6. Use those of the
+    # libc++ that Xcode 7 (iOS 9.3 SDK) shipped: they build against iOS 6's
+    # libc++.1.dylib.
+    if [ ! -d "${IOS6_LIBCXX}" ]; then
+        local tarball="${IOS6_DIR}/libcxx-${IOS6_LIBCXX_VERSION}.src.tar.xz"
+        if [ "$NONETWORK" = "yes" -a ! -f "${tarball}" ]; then
+            echo "*** ${tarball} is missing and -n forbids downloading it ***"
+            exit 1
+        fi
+        [ -f "${tarball}" ] || curl -fL -o "${tarball}" \
+            "https://releases.llvm.org/${IOS6_LIBCXX_VERSION}/libcxx-${IOS6_LIBCXX_VERSION}.src.tar.xz"
+        echo "${IOS6_LIBCXX_SHA256}  ${tarball}" | shasum -a 256 -c - > /dev/null || {
+            echo "*** ${tarball} has the wrong checksum ***"
+            exit 1
+        }
+        tar -xJf "${tarball}" -C "${IOS6_DIR}"
+    fi
+
+    # Link stubs with what iOS 6.1.6 really exports
+    python3 -I "${ROOT_DIR}/Packaging/iOS6/mkstubs.py" \
+        "${ROOT_DIR}/Packaging/iOS6/ios-6.1.6-armv7-exports.txt" "${IOS6_DIR}/stubs"
+}
+
 buildLibVLC() {
     ARCH="$1"
     PLATFORM="$2"
@@ -376,6 +418,12 @@ buildLibVLC() {
     info "Compiling ${ARCH} (${ACTUAL_ARCH}) with SDK version ${SDK_VERSION}, platform ${PLATFORM}"
 
     SDKROOT=`xcode-select -print-path`/Platforms/${OSSTYLE}${PLATFORM}.platform/Developer/SDKs/${OSSTYLE}${PLATFORM}${SDK_VERSION}.sdk
+    if [ "$IOS6" = "yes" ]; then
+        # Xcode no longer ships an SDK that can target iOS 6, so use the one
+        # from Swift-iOS6 (iPhoneOS9.3.sdk, armv7 stubs).
+        SDKROOT="${IOS6_SDKROOT:-${ROOT_DIR}/../Swift-iOS6/sdk/iPhoneOS9.3.sdk}"
+        SDK_VERSION=`plutil -extract Version raw -o - "${SDKROOT}/SDKSettings.plist"`
+    fi
 
     if [ ! -d "${SDKROOT}" ]
     then
@@ -399,6 +447,10 @@ buildLibVLC() {
     export PLATFORM=$PLATFORM
     export SDK_VERSION=$SDK_VERSION
     export VLCSDKROOT=$SDKROOT
+    if [ "$IOS6" = "yes" ]; then
+        # lets contribs pick code paths by OS version (darwin_min_os_at_least)
+        export VLC_DEPLOYMENT_TARGET=$SDK_MIN
+    fi
 
     EXTRA_CFLAGS="-isysroot ${SDKROOT}"
     EXTRA_LDFLAGS="-arch ${ACTUAL_ARCH}"
@@ -427,6 +479,21 @@ buildLibVLC() {
     fi
     
     EXTRA_CFLAGS+=" -arch ${ACTUAL_ARCH}"
+    if [ "$IOS6" = "yes" ]; then
+        # Any API newer than the deployment target is a compile error, so
+        # configure tests leave out what iOS 6 lacks. Recent clang also turns
+        # these old-C diagnostics into errors, which breaks older contribs.
+        EXTRA_CFLAGS+=" -Werror=partial-availability -Werror=unguarded-availability"
+        EXTRA_CFLAGS+=" -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
+        EXTRA_CFLAGS+=" -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
+        EXTRA_CFLAGS+=" -Wno-error=incompatible-function-pointer-types"
+        # ARM, not Thumb: Xcode's linker drops the Thumb bit from pointers
+        # to local Thumb functions (and from LC_MAIN), which crashes on call.
+        EXTRA_CFLAGS+=" -marm"
+        # iOS 6's own symbols first. Its libc++ doesn't re-export libc++abi.
+        EXTRA_LDFLAGS+=" -L${IOS6_STUBS} -lc++abi"
+        IOS6_CXXFLAGS="-stdlib=libc++ -nostdinc++ -isystem ${IOS6_LIBCXX}"
+    fi
     PLATFORM_VERSION="-platform_version,${OSVERSIONMINLDFLAG},${SDK_MIN},${SDK_VERSION}"
     if [ "$PLATFORM" = "Simulator" ]; then
         PLATFORM_VERSION="-platform_version,${OSVERSIONMINLDFLAG}-simulator,${SDK_MIN},${SDK_VERSION}"
@@ -479,6 +546,10 @@ buildLibVLC() {
     if [ "$IOS" = "yes" ]; then
         CUSTOMOSOPTIONS=""
     fi
+    if [ "$IOS6" = "yes" ]; then
+        # librist's bundled mbedtls needs clock_gettime (iOS 10)
+        CUSTOMOSOPTIONS="${CUSTOMOSOPTIONS} --disable-librist"
+    fi
 
     BUILD_TRIPLET=$(vlcGetBuildTriplet)
 
@@ -503,6 +574,15 @@ buildLibVLC() {
     fi
     # The following symbols do not exist on the minimal iOS version (7.0), so they are disabled
     # here. This allows compilation also with newer iOS SDKs
+
+    if [ "$IOS6" = "yes" ]; then
+        # Added symbols in iOS 7 and 8
+        for f in ffsll flsll fdopendir openat fstatat readlinkat memset_s \
+                 faccessat fchmodat fchownat mkdirat renameat symlinkat \
+                 getattrlistat mkfifoat mknodat; do
+            export ac_cv_func_$f=no
+        done
+    fi
 
     # Added symbols in macOS 10.10 / iOS 8
     export ac_cv_func_linkat=no
@@ -602,6 +682,12 @@ buildLibVLC() {
     rm -f config.mak
     echo "EXTRA_CFLAGS += ${EXTRA_CFLAGS}" >> config.mak
     echo "EXTRA_LDFLAGS += ${EXTRA_LDFLAGS}" >> config.mak
+    if [ "$IOS6" = "yes" ]; then
+        # iOS 6 defaults to libstdc++, whose headers the SDK no longer has.
+        # libc++ ships with iOS since 5.0. The contrib system only forces it
+        # on macOS.
+        echo "EXTRA_CXXFLAGS += ${IOS6_CXXFLAGS}" >> config.mak
+    fi
     make fetch -j$MAKE_JOBS
     make -j$MAKE_JOBS > ${out}
 
@@ -634,6 +720,9 @@ buildLibVLC() {
 	export CXXFLAGS="${EXTRA_CFLAGS}"
 	export OBJCFLAGS="${EXTRA_CFLAGS}"
 	export LDFLAGS="${EXTRA_LDFLAGS}"
+    if [ "$IOS6" = "yes" ]; then
+        export CXXFLAGS="${CXXFLAGS} ${IOS6_CXXFLAGS}"
+    fi
 
     if [ "$DEBUG" = "yes" ]; then
         DEBUGFLAG="--enable-debug"
@@ -914,6 +1003,9 @@ buildMobileKit() {
     fi
 }
 
+if [ "$IOS6" = "yes" ]; then
+    prepareIOS6Toolchain
+fi
 if [ "$BUILD_DEVICE" != "no" ]; then
     buildMobileKit iphoneos
 fi
@@ -1161,6 +1253,65 @@ if [ "$MACOS" = "yes" ]; then
 fi
 if [ "$IOS" = "yes" ]; then
     collect_symbols_and_libraries "iPhone"
+fi
+
+buildStaticFrameworkForIOS6() {
+    # Xcode no longer builds for armv7 or iOS 6, so compile VLCKit with clang
+    # and merge it with libvlc, its plugins and contribs into one static library.
+    info "Building static MobileVLCKit.framework for iOS ${SDK_MIN} (armv7)"
+
+    local SDKROOT="${IOS6_SDKROOT:-${ROOT_DIR}/../Swift-iOS6/sdk/iPhoneOS9.3.sdk}"
+    local OBJDIR="${ROOT_DIR}/build/iOS6/obj"
+    local FRAMEWORK="${ROOT_DIR}/build/iOS6/MobileVLCKit.framework"
+    local CFLAGS="-arch armv7 -marm -isysroot ${SDKROOT} -miphoneos-version-min=${SDK_MIN}
+        -fobjc-arc -std=gnu99 -Os -g -DNDEBUG
+        -Werror=unguarded-availability -Werror=partial-availability
+        -include ${ROOT_DIR}/Headers/PCH/MobilePrefix.pch
+        -I${ROOT_DIR}/Headers/Public -I${ROOT_DIR}/Headers/Internal -I${ROOT_DIR}/Headers
+        -I${ROOT_DIR}/Resources/MobileVLCKit
+        -I${VLCROOT}/install-iPhoneOS/armv7/include"
+
+    # the MobileVLCKit target's sources
+    local SOURCES="VLCAdjustFilter VLCAudio VLCAudioEqualizer VLCConsoleLogger
+        VLCCustomDialogProvider VLCDialogProvider VLCEmbeddedDialogProvider
+        VLCEventsConfiguration VLCEventsHandler VLCFileLogger VLCFilter
+        VLCHelperCode VLCLibrary VLCLogMessageFormatter VLCMedia
+        VLCMediaDiscoverer VLCMediaList VLCMediaListPlayer VLCMediaMetaData
+        VLCMediaPlayer VLCMediaThumbnailer VLCRendererDiscoverer
+        VLCRendererItem VLCTime VLCTranscoder VLCiOSLegacyDialogProvider"
+
+    rm -rf "${OBJDIR}" "${FRAMEWORK}"
+    mkdir -p "${OBJDIR}" "${FRAMEWORK}/Headers" "${FRAMEWORK}/Modules"
+
+    local objects=""
+    for src in $SOURCES; do
+        xcrun clang -c -x objective-c $CFLAGS "${ROOT_DIR}/Sources/${src}.m" -o "${OBJDIR}/${src}.o"
+        objects="$objects ${OBJDIR}/${src}.o"
+    done
+
+    # libvlc, libvlccore, compat, the plugins and the contribs, from the
+    # list collect_symbols_and_libraries wrote for Xcode
+    local libs=`grep '^VLC_PLUGINS_DEVICE_LDFLAGS=' "${ROOT_DIR}/Resources/MobileVLCKit/vlc-plugins-iPhone.xcconfig" \
+        | sed -e 's/^VLC_PLUGINS_DEVICE_LDFLAGS=//' -e "s|\$(PROJECT_DIR)|${ROOT_DIR}|g"`
+
+    xcrun libtool -static -arch_only armv7 -no_warning_for_no_symbols \
+        -o "${FRAMEWORK}/MobileVLCKit" $objects $libs
+
+    cp "${ROOT_DIR}"/Headers/Public/*.h "${FRAMEWORK}/Headers/"
+    cp -R "${VLCROOT}/install-iPhoneOS/armv7/include/vlc" "${FRAMEWORK}/Headers/vlc"
+    cat > "${FRAMEWORK}/Modules/module.modulemap" << EOF
+framework module MobileVLCKit {
+    umbrella header "MobileVLCKit.h"
+    export *
+    module * { export * }
+}
+EOF
+
+    info "Built ${FRAMEWORK}"
+}
+
+if [ "$IOS6" = "yes" ]; then
+    buildStaticFrameworkForIOS6
 fi
 
 info "all done"
